@@ -1,0 +1,322 @@
+```{r}
+# Install 'farff' package first, as it's a dependency for OpenML to handle ARFF files.
+#install.packages("farff", lib = "G:/Meine Ablage/R/frenchMotor/lib")
+
+# Install + load OpenML client
+#install.packages("OpenML", lib = "G:/Meine Ablage/R/frenchMotor/lib")
+
+library(OpenML, lib.loc = "G:/Meine Ablage/R/frenchMotor/lib")
+library(farff, lib.loc = "G:/Meine Ablage/R/frenchMotor/lib")
+```
+
+```{r}
+compute_poisson_deviance <- function(glm_model, learn_data, test_data, response_col = "ClaimNb") {
+  # fitted values
+  mu_learn <- fitted(glm_model)
+  mu_test  <- predict(glm_model, newdata = test_data, type = "response")
+  
+  # responses
+  y_learn <- learn_data[[response_col]]
+  y_test  <- test_data[[response_col]]
+  
+  # in-sample deviance
+  dev_learn <- 2 * (sum(mu_learn) - sum(y_learn) + sum(log((y_learn / mu_learn)^y_learn)))
+  avg_dev_learn <- dev_learn / nrow(learn_data)
+  
+  # out-of-sample deviance
+  dev_test <- 2 * (sum(mu_test) - sum(y_test) + sum(log((y_test / mu_test)^y_test)))
+  avg_dev_test <- dev_test / nrow(test_data)
+  
+  c(average_in_sample = avg_dev_learn, average_out_of_sample = avg_dev_test)
+}
+```
+
+```{r}
+compute_poisson_deviance2 <- function(mu_learn, y_learn, mu_test, y_test) {
+
+  # in-sample deviance
+  dev_learn <- 2 * (sum(mu_learn) - sum(y_learn) + sum(log((y_learn / mu_learn)^y_learn)))
+  avg_dev_learn <- dev_learn / length(mu_learn)
+  
+  # out-of-sample deviance
+  dev_test <- 2 * (sum(mu_test) - sum(y_test) + sum(log((y_test / mu_test)^y_test)))
+  avg_dev_test <- dev_test / length(mu_test)
+  
+  c(average_in_sample = avg_dev_learn, average_out_of_sample = avg_dev_test)
+}
+```
+
+```{r}
+# freMTPL2freq (ID 41214)
+freq <- getOMLDataSet(data.id = 41214)$data
+
+# freMTPL2sev (ID 41215)
+sev  <- getOMLDataSet(data.id = 41215)$data
+```
+
+```{r}
+# M. V. Wüthrich, M. Merz, Statistical Foundations of Actuarial Learning and its
+# Applications, Springer Actuarial, https://doi.org/10.1007/978-3-031-12409-9_13
+# Listing 13.1 Data cleaning applied to the French MTPL data set
+
+
+dat <- freq[,-2]
+dat$VehGas <- factor(dat$VehGas)
+sev$ClaimNb <- 1
+dat0 <- aggregate(sev, by=list(IDpol=sev$IDpol), FUN = sum)[c(1,3:4)]
+names(dat0)[2] <- "ClaimTotal"
+dat <- merge(x=dat, y=dat0, by="IDpol", all.x=TRUE)
+dat[is.na(dat)] <- 0
+dat <- dat[which(dat$ClaimNb <=5),]
+dat$Exposure <- pmin(dat$Exposure, 1)
+sev <- sev[which(sev$IDpol %in% dat$IDpol), c(1,2)]
+dat$VehBrand <- factor(dat$VehBrand, levels=c("B1","B2","B3","B4","B5","B6", "B10","B11","B12","B13","B14"))
+#
+str(dat)
+```
+
+```{r}
+# M. V. Wüthrich, M. Merz, Statistical Foundations of Actuarial Learning and its
+# Applications, Springer Actuarial, https://doi.org/10.1007/978-3-031-12409-9_5
+# Listing 5.1 Pre-processing of features for model Poisson GLM1 in R
+
+dat$AreaGLM <- as.integer(dat$Area)
+dat$VehPowerGLM <- as.factor(pmin(dat$VehPower, 9))
+dat$VehAgeGLM <- as.factor(cut(dat$VehAge, c(0,5,12,101),
+                               labels = c("0-5","6-12","12+"),
+                               include.lowest = TRUE))
+dat$DrivAgeGLM <- as.factor(cut(dat$DrivAge, c(18,20,25,30,40,50,70,101),
+                                labels = c("18-20","21-25","26-30","31-40","41-50",
+                                          "51-70","71+"), include.lowest = TRUE))
+dat$BonusMalusGLM <- pmin(dat$BonusMalus, 150)
+dat$DensityGLM <- log(dat$Density)
+```
+
+```{r}
+# M. V. Wüthrich, M. Merz, Statistical Foundations of Actuarial Learning and its
+# Applications, Springer Actuarial, https://doi.org/10.1007/978-3-031-12409-9_5
+# Listing 5.2 Partition of the data to learning sample L and test sample T
+RNGversion("3.5.0")
+set.seed(500)
+ll <- sample(c(1:nrow(dat)), round(0.9*nrow(dat)), replace = FALSE)
+learn <- dat[ll,]
+test <- dat[-ll,]
+```
+
+```{r}
+table(learn$ClaimNb)
+
+# ### Table 5.4 Contingency table of observed number of policies against predicted number of policies with given claim counts ClaimNb
+ 
+#
+# | Schadensfälle (ClaimNb) | Beobachtete Anzahl von Policen | Vorhergesagte Anzahl von Policen |
+# | :-----------------------: | :-----------------------------: | :-----------------------------: |
+# | 0                         | 587'772                         | 587'325                         |
+# | 1                         | 21'198                          | 22'064                          |
+# | 2                         | 1'174                           | 779                             |
+# | 3                         | 57                              | 34                              |
+# | 4                         | 4                               | 3                               |
+# | 5                         | 1                               | 0.3                             |
+#
+
+```
+
+```{r}
+# M. V. Wüthrich, M. Merz, Statistical Foundations of Actuarial Learning and its
+# Applications, Springer Actuarial, https://doi.org/10.1007/978-3-031-12409-9_5
+#Listing5.3 ResultsinmodelPoissonGLM1usingtheRcommandglm
+glm1 <- glm(formula= ClaimNb~ VehPowerGLM+ VehAgeGLM+DrivAgeGLM+
+            BonusMalusGLM+ VehBrand+VehGas +DensityGLM+ Region+
+            AreaGLM, family= poisson(),data =learn,offset= log(Exposure))
+
+summary(glm1)
+```
+
+```{r}
+compute_poisson_deviance(glm1,learn,test)
+```
+
+```{r}
+suppressWarnings({
+glm1T <- glm(formula= ClaimNb/Exposure~ VehPowerGLM+ VehAgeGLM+DrivAgeGLM+
+            BonusMalusGLM+ VehBrand+VehGas +DensityGLM+ Region+
+            AreaGLM, family= poisson(),data =learn,weights= Exposure)
+})
+summary(glm1T)
+```
+
+```{r}
+# fitted values
+mu_learn <- fitted(glm1T) * learn[["Exposure"]]
+mu_test  <- predict(glm1T, newdata = test, type = "response") * test[["Exposure"]]
+
+# responses
+y_learn <- learn[["ClaimNb"]]
+y_test  <- test[["ClaimNb"]]
+
+compute_poisson_deviance2(mu_learn, y_learn, mu_test, y_test)
+```
+
+```{r}
+# M. V. Wüthrich, M. Merz, Statistical Foundations of Actuarial Learning and its
+# Applications, Springer Actuarial, https://doi.org/10.1007/978-3-031-12409-9_5
+# Listing 5.7 drop1 analysis of model Poisson GLM2
+
+glm3<-glm(ClaimNb ~ VehPowerGLM + VehAgeGLM + log(DrivAge) + I(DrivAge^3) + I(DrivAge^4) + BonusMalusGLM*DrivAge + BonusMalusGLM*I(DrivAge^2) + VehBrand + VehGas + DensityGLM + Region + AreaGLM,
+          family = poisson(),
+          data = learn,
+          offset = log(Exposure)
+          )
+
+summary(glm3)
+```
+
+```{r}
+compute_poisson_deviance(glm3,learn,test)
+```
+
+```{r}
+# M. V. Wüthrich, M. Merz, Statistical Foundations of Actuarial Learning and its
+# Applications, Springer Actuarial, https://doi.org/10.1007/978-3-031-12409-9_5
+# Listing 5.8 Implementation of model NB GLM3
+
+d.glmnb <- glm(ClaimNb/Exposure ~ VehPowerGLM + VehAgeGLM
++ log(DrivAge) + I(DrivAge^3) + I(DrivAge^4)
++ BonusMalusGLM*DrivAge + BonusMalusGLM*I(DrivAge^2)
++ VehBrand + VehGas + DensityGLM + Region + AreaGLM,
+data=learn, weights=Exposure,
+family=negative.binomial(1.81, link="log"))
+
+summary(d.glmnb)
+```
+
+```{r}
+# fitted values
+mu_learn <- fitted(d.glmnb) * learn[["Exposure"]]
+mu_test  <- predict(d.glmnb, newdata = test, type = "response") * test[["Exposure"]]
+
+# responses
+y_learn <- learn[["ClaimNb"]]
+y_test  <- test[["ClaimNb"]]
+
+compute_poisson_deviance2(mu_learn, y_learn, mu_test, y_test)
+```
+
+```{r}
+str(learn)
+```
+
+```{r}
+learn_reg <- learn
+
+learn_reg$AreaR <- learn$Area
+
+learn_reg$VehPowerR <- as.factor(learn$VehPower)
+
+learn_reg$VehAgeR <- as.factor(learn$VehAge)
+
+learn_reg$DrivAgeR <- as.factor(learn$DrivAge)
+
+learn_reg$BonusMalusR1 <- cut(
+  learn$BonusMalus,
+  breaks = unique(quantile(learn$BonusMalus, probs = seq(0, 1, length.out = 101), na.rm = TRUE)),
+  include.lowest = TRUE
+)
+
+learn_reg$BonusMalusR2 <- cut(
+  learn$BonusMalus,
+  breaks = seq(min(learn$BonusMalus), max(learn$BonusMalus), length.out = 101),
+  include.lowest = TRUE
+)
+
+learn_reg$BonusMalusR3 <- cut(
+  learn$BonusMalus,
+  breaks = c(50,51,54,57,60,76,90,  95, 100, 106, 230),
+  include.lowest = TRUE
+)  
+
+learn_reg$VehBrandR <- as.factor(learn$VehBrand)
+
+learn_reg$VehGasR <- as.factor(learn$VehGas)
+
+learn_reg$DensityR1 <- cut(
+  learn$Density,
+  breaks = unique(quantile(learn$Density, probs = seq(0, 1, length.out = 101), na.rm = TRUE)),
+  include.lowest = TRUE
+)
+
+learn_reg$DensityR2 <- cut(
+  learn$Density,
+  breaks = seq(min(learn$Density), max(learn$Density), length.out = 101),
+  include.lowest = TRUE
+)
+
+learn_reg$w_dummy <- 1
+```
+
+```{r}
+test_reg <- test
+
+
+test_reg$AreaR <- test$Area
+
+
+test_reg$VehPowerR <- as.factor(test$VehPower)
+test_reg$VehAgeR <- as.factor(test$VehAge)
+test_reg$DrivAgeR <- as.factor(test$DrivAge)
+test_reg$VehBrandR <- as.factor(test$VehBrand)
+test_reg$VehGasR <- as.factor(test$VehGas)
+
+
+learn_BonusMalus_quantiles <- unique(quantile(learn$BonusMalus, probs = seq(0, 1, length.out = 101), na.rm = TRUE))
+test_reg$BonusMalusR1 <- cut(
+  test$BonusMalus,
+  breaks = learn_BonusMalus_quantiles,
+  include.lowest = TRUE
+)
+
+
+test_reg$BonusMalusR2 <- cut(
+  test$BonusMalus,
+  breaks = seq(min(learn$BonusMalus), max(learn$BonusMalus), length.out = 101),
+  include.lowest = TRUE
+)
+
+
+test_reg$BonusMalusR3 <- cut(
+  test$BonusMalus,
+  breaks = c(50, 51, 54, 57, 60, 76, 90, 95, 100, 106, 230),
+  include.lowest = TRUE
+)
+
+
+learn_Density_quantiles <- unique(quantile(learn$Density, probs = seq(0, 1, length.out = 101), na.rm = TRUE))
+test_reg$DensityR1 <- cut(
+  test$Density,
+  breaks = learn_Density_quantiles,
+  include.lowest = TRUE
+)
+
+
+test_reg$DensityR2 <- cut(
+  test$Density,
+  breaks = seq(min(learn$Density), max(learn$Density), length.out = 101),
+  include.lowest = TRUE
+)
+```
+
+```{r}
+str(learn_reg)
+```
+
+```{r}
+glm1R_T <- glm(formula= ClaimNb~ AreaR+ VehPowerR+VehAgeR+
+            DrivAgeR+ BonusMalusR1+VehBrandR +VehGasR+ Region+
+            DensityR1, family= poisson(),data =learn_reg,offset= log(Exposure))
+
+summary(glm1R_T)
+```
+
+```{r}
+compute_poisson_deviance(glm1R_T,learn_reg,test_reg)
+```
